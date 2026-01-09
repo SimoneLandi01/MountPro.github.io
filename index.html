@@ -51,6 +51,60 @@
 
         /* Dark Mode Tile Filters */
         .dark-tiles { filter: invert(100%) hue-rotate(180deg) brightness(95%) contrast(90%); }
+
+        /* Dual Range Slider Styles */
+        .range-slider-container input[type=range] {
+            pointer-events: none;
+            -webkit-appearance: none;
+            z-index: 20;
+            height: 100%;
+            width: 100%;
+            position: absolute;
+            left: 0;
+            top: 0;
+            background: transparent;
+            cursor: pointer;
+        }
+        .range-slider-container input[type=range]::-webkit-slider-thumb {
+            pointer-events: all;
+            width: 16px;
+            height: 16px;
+            -webkit-appearance: none;
+            background-color: #ea580c; /* orange-600 */
+            border-radius: 50%;
+            box-shadow: 0 0 0 2px #18181b; /* zinc-900 border */
+            cursor: pointer;
+        }
+        /* Firefox support */
+        .range-slider-container input[type=range]::-moz-range-thumb {
+            pointer-events: all;
+            width: 16px;
+            height: 16px;
+            border: none;
+            background-color: #ea580c;
+            border-radius: 50%;
+            box-shadow: 0 0 0 2px #18181b;
+            cursor: pointer;
+        }
+
+        /* Dark Leaflet Popup Overrides */
+        .leaflet-popup-content-wrapper, .leaflet-popup-tip {
+            background-color: #18181b !important; /* zinc-900 */
+            color: #e4e4e7 !important; /* zinc-200 */
+            border: 1px solid #3f3f46; /* zinc-700 */
+            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.5);
+        }
+        .leaflet-popup-content {
+            margin: 0 !important;
+            line-height: 1.5;
+        }
+        .leaflet-container a.leaflet-popup-close-button {
+            color: #a1a1aa !important; /* zinc-400 */
+            padding: 8px !important;
+        }
+        .leaflet-container a.leaflet-popup-close-button:hover {
+            color: #e4e4e7 !important;
+        }
     </style>
 <script type="importmap">
 {

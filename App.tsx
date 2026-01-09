@@ -37,7 +37,8 @@ import {
   SignalMedium,
   SignalLow,
   SignalZero,
-  Smartphone
+  Smartphone,
+  ArrowRight
 } from 'lucide-react';
 import L from 'leaflet';
 import { POI, POIType, Exposure, SignalStrength } from './types';
@@ -45,39 +46,60 @@ import { MOCK_POIS } from './constants';
 import { getLiveOutdoorInfo, AIResponse } from './services/geminiService';
 import { fetchOsmPois, searchOsmPoisByName } from './services/osmService';
 
+// --- Custom Hook for Click Outside ---
+function useOnClickOutside(ref: React.RefObject<HTMLElement>, handler: (event: MouseEvent | TouchEvent) => void) {
+  useEffect(() => {
+    const listener = (event: MouseEvent | TouchEvent) => {
+      // Do nothing if clicking ref's element or descendent elements
+      if (!ref.current || ref.current.contains(event.target as Node)) {
+        return;
+      }
+      handler(event);
+    };
+    document.addEventListener("mousedown", listener);
+    document.addEventListener("touchstart", listener);
+    return () => {
+      document.removeEventListener("mousedown", listener);
+      document.removeEventListener("touchstart", listener);
+    };
+  }, [ref, handler]);
+}
+
 // --- Custom Marker Icons Logic ---
 const createCustomIcon = (type: POIType, isSelected: boolean) => {
   
   // --- BIVOUAC: Drop Shape (Pin) with House Icon ---
   if (type === POIType.BIVOUAC) {
-    const size = isSelected ? 42 : 34; 
+    // ADJUSTED SIZE AS REQUESTED: 44px for selected
+    const size = isSelected ? 44 : 34; 
+    const zIndex = isSelected ? 1000 : 1;
     
     return L.divIcon({
       className: 'custom-poi-marker',
       html: `
-        <div class="w-full h-full drop-shadow-lg transition-transform duration-300 ${isSelected ? '-translate-y-2' : ''}">
+        <div class="w-full h-full drop-shadow-2xl transition-all duration-300 origin-bottom ${isSelected ? '-translate-y-4 scale-110' : ''}">
           <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" class="w-full h-full filter">
             <!-- Drop/Pin Shape -->
-            <path d="M12 2C7.58 2 4 5.58 4 10C4 14.42 12 22 12 22C12 22 20 14.42 20 10C20 5.58 16.42 2 12 2Z" fill="#ea580c" stroke="white" stroke-width="1.5"/>
+            <path d="M12 2C7.58 2 4 5.58 4 10C4 14.42 12 22 12 22C12 22 20 14.42 20 10C20 5.58 16.42 2 12 2Z" fill="${isSelected ? '#c2410c' : '#ea580c'}" stroke="white" stroke-width="1.5"/>
             <!-- Stylized House Icon -->
             <path d="M8 10.5L12 7L16 10.5V15H8V10.5Z" fill="white"/> 
-            <rect x="10.5" y="13" width="3" height="3" fill="#ea580c"/>
+            <rect x="10.5" y="13" width="3" height="3" fill="${isSelected ? '#c2410c' : '#ea580c'}"/>
           </svg>
         </div>
       `,
       iconSize: [size, size],
       iconAnchor: [size / 2, size], 
-      popupAnchor: [0, -size]
+      popupAnchor: [0, -size + 5] // Adjust popup position
     });
   } 
   
   // --- FOUNTAIN: Circle Shape ---
   else if (type === POIType.FOUNTAIN) {
-    const size = isSelected ? 36 : 28; 
+    const size = isSelected ? 48 : 28; 
     const bgColor = 'bg-blue-500';
     // Water drop icon inside circle
     const iconSvg = `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22a7 7 0 0 0 7-7c0-2-1-3.9-3-7.4-1.7-2.8-3-4-4-6.6-1 2.6-2.3 3.8-4 6.6-2 3.5-3 5.4-3 7.4a7 7 0 0 0 7 7z"/></svg>`; 
-    const ring = isSelected ? `ring-4 ring-white/30` : 'shadow-lg';
+    const ring = isSelected ? `ring-4 ring-white/50 shadow-2xl` : 'shadow-lg';
 
     return L.divIcon({
       className: 'custom-poi-marker',
@@ -107,6 +129,10 @@ export default function App() {
   // --- State Managment ---
   const [isSidebarOpen, setIsSidebarOpen] = useState(false); 
   const [selectedPoi, setSelectedPoi] = useState<POI | null>(null);
+  
+  // NEW: State to control if the full details panel is open
+  const [isDetailPanelOpen, setIsDetailPanelOpen] = useState(false);
+
   const [viewMode, setViewMode] = useState<'list' | 'map'>('map'); 
   const [liveInfo, setLiveInfo] = useState<AIResponse | null>(null);
   const [isLoadingLive, setIsLoadingLive] = useState(false);
@@ -127,12 +153,12 @@ export default function App() {
   const [heading, setHeading] = useState<number>(0);
 
   // --- Filter States ---
-  // DEFAULT TO BIVOUACS
   const [selectedType, setSelectedType] = useState<POIType | 'All'>(POIType.BIVOUAC);
   const [altitudeRange, setAltitudeRange] = useState<{min: number, max: number}>({ min: 0, max: 4810 });
-  const [selectedExposure, setSelectedExposure] = useState<Exposure | 'All'>('All');
   
-  // Expanded Filters
+  // CHANGED: Multi-select Exposure State (Empty array means "All")
+  const [selectedExposures, setSelectedExposures] = useState<Exposure[]>([]); 
+
   const [filterWater, setFilterWater] = useState(false);
   const [filterRoof, setFilterRoof] = useState(false);
   const [filterElectricity, setFilterElectricity] = useState(false);
@@ -142,9 +168,19 @@ export default function App() {
   const mapRef = useRef<L.Map | null>(null);
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const baseLayerRef = useRef<L.TileLayer | null>(null);
-  const overlayLayerRef = useRef<L.TileLayer | null>(null); // For roads on satellite
+  const overlayLayerRef = useRef<L.TileLayer | null>(null); 
   const rainLayerRef = useRef<L.TileLayer | null>(null);
   const markersRef = useRef<Map<string, L.Marker>>(new Map());
+
+  // Refs for Click Outside
+  const layersMenuRef = useRef<HTMLDivElement>(null);
+  const sidebarContentRef = useRef<HTMLDivElement>(null);
+  const detailPanelRef = useRef<HTMLDivElement>(null);
+
+  // Apply Click Outside behavior
+  useOnClickOutside(layersMenuRef, () => setIsLayersMenuOpen(false));
+  useOnClickOutside(sidebarContentRef, () => setIsSidebarOpen(false));
+  useOnClickOutside(detailPanelRef, () => setIsDetailPanelOpen(false));
 
   // Ref to hold the AbortController for the current fetch request
   const fetchAbortControllerRef = useRef<AbortController | null>(null);
@@ -154,20 +190,26 @@ export default function App() {
 
   useEffect(() => { selectedTypeRef.current = selectedType; }, [selectedType]);
 
+  // --- Global Event Listener for Popup Buttons ---
+  useEffect(() => {
+    // This allows the HTML string inside Leaflet popup to communicate with React
+    (window as any).openMountProDetails = () => {
+       setIsDetailPanelOpen(true);
+    };
+
+    return () => {
+      delete (window as any).openMountProDetails;
+    }
+  }, []);
+
   // --- Compass Logic ---
   useEffect(() => {
     const handleOrientation = (event: DeviceOrientationEvent) => {
-      // Use webkitCompassHeading for iOS or alpha for Android
       const compass = (event as any).webkitCompassHeading || Math.abs(event.alpha! - 360);
       if (compass) setHeading(compass);
     };
-
-    if (window.DeviceOrientationEvent) {
-      window.addEventListener('deviceorientation', handleOrientation);
-    }
-    return () => {
-      window.removeEventListener('deviceorientation', handleOrientation);
-    };
+    if (window.DeviceOrientationEvent) window.addEventListener('deviceorientation', handleOrientation);
+    return () => window.removeEventListener('deviceorientation', handleOrientation);
   }, []);
 
   // --- Navigation & Reviews Logic ---
@@ -182,7 +224,6 @@ export default function App() {
     if (liveInfo?.data?.google_maps_url) {
        window.open(liveInfo.data.google_maps_url, '_blank');
     } else {
-       // Fallback to query search if no specific link found
        const query = encodeURIComponent(selectedPoi.name);
        window.open(`https://www.google.com/maps/search/?api=1&query=${query}`, '_blank');
     }
@@ -221,13 +262,35 @@ export default function App() {
     }
   };
 
-  // --- Helper for Signal Icon ---
-  const renderSignalIcon = (strength: number) => {
-    const className = "w-4 h-4 text-emerald-500";
-    if (strength >= 4) return <SignalHigh className={className} />;
-    if (strength >= 3) return <SignalMedium className={className} />;
-    if (strength >= 1) return <SignalLow className="w-4 h-4 text-yellow-500" />;
-    return <SignalZero className="w-4 h-4 text-zinc-600" />;
+  // --- Helper for Signal Bars (Unified Logic) ---
+  const renderSignalBars = (level: number) => {
+      // Level 0 to 4
+      return (
+          <div className="flex items-end gap-1 h-5">
+              {[1, 2, 3, 4].map((bar) => (
+                  <div 
+                    key={bar}
+                    className={`w-1.5 rounded-sm transition-all duration-500 ${level >= bar ? 'bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.5)]' : 'bg-zinc-700/50'}`}
+                    style={{ height: `${bar * 25}%` }}
+                  />
+              ))}
+          </div>
+      );
+  };
+
+  const getSignalLevel = (poiSignal: SignalStrength, aiData?: any): number => {
+    // 1. Prefer AI precise data if available
+    if (aiData && typeof aiData.strength === 'number') {
+        return aiData.strength;
+    }
+    // 2. Fallback to static POI data
+    switch (poiSignal) {
+        case SignalStrength.EXCELLENT: return 4;
+        case SignalStrength.HIGH: return 3;
+        case SignalStrength.MEDIUM: return 2;
+        case SignalStrength.LOW: return 1;
+        default: return 0;
+    }
   };
 
   // --- Search Logic ---
@@ -249,9 +312,11 @@ export default function App() {
 
       const bestMatch = results[0];
       setSelectedPoi(bestMatch);
+      // Auto open details on search
+      setIsDetailPanelOpen(true);
       
       if (mapRef.current) {
-        mapRef.current.flyTo([bestMatch.coordinates.lat, bestMatch.coordinates.lng], 14, { duration: 1.5 });
+        mapRef.current.flyTo([bestMatch.coordinates.lat, bestMatch.coordinates.lng], 16, { duration: 1.5 });
       }
     } else {
       alert("Nessun bivacco trovato con questo nome.");
@@ -259,16 +324,11 @@ export default function App() {
     setIsGlobalSearching(false);
   };
 
-  // --- Core Fetch Function (Viewport) with AbortController ---
+  // --- Core Fetch Function ---
   const executeFetch = async () => {
     if (!mapRef.current || isOffline) return;
     
-    // Abort previous request if it exists
-    if (fetchAbortControllerRef.current) {
-      fetchAbortControllerRef.current.abort();
-    }
-
-    // Create new controller
+    if (fetchAbortControllerRef.current) fetchAbortControllerRef.current.abort();
     const controller = new AbortController();
     fetchAbortControllerRef.current = controller;
 
@@ -283,8 +343,7 @@ export default function App() {
 
     try {
       const newPois = await fetchOsmPois(formattedBounds, selectedTypeRef.current, controller.signal);
-      
-      if (controller.signal.aborted) return; // Ignore if cancelled
+      if (controller.signal.aborted) return;
 
       setAllPois(prev => {
         const existingIds = new Set(prev.map(p => p.id));
@@ -292,7 +351,7 @@ export default function App() {
         return [...prev, ...uniqueNewPois]; 
       });
     } catch (err) {
-       // Ignore abort errors
+       // Ignore abort
     } finally {
       if (!controller.signal.aborted) {
         setIsSearchingArea(false);
@@ -308,10 +367,14 @@ export default function App() {
       if (!isAllowedType) return false;
 
       const matchesType = selectedType === 'All' || poi.type === selectedType;
-      const matchesAltitude = (poi.altitude === 0 && altitudeRange.min === 0) || (poi.altitude >= altitudeRange.min && poi.altitude <= altitudeRange.max);
-      const matchesExposure = selectedExposure === 'All' || poi.exposure === selectedExposure || poi.exposure === Exposure.VARIOUS;
-      const matchesSignal = !filterSignal || poi.signal !== SignalStrength.NONE; 
+      const matchesAltitude = (poi.altitude === 0) || (poi.altitude >= altitudeRange.min && poi.altitude <= altitudeRange.max);
+      
+      // Multi-exposure logic: If empty (All), match everything. Else match if included.
+      const matchesExposure = selectedExposures.length === 0 
+        ? true 
+        : selectedExposures.includes(poi.exposure) || poi.exposure === Exposure.VARIOUS;
 
+      const matchesSignal = !filterSignal || poi.signal !== SignalStrength.NONE; 
       const matchesWater = !filterWater || poi.hasWater;
       const matchesRoof = !filterRoof || poi.hasRoof;
       const matchesElectricity = !filterElectricity || poi.hasElectricity;
@@ -319,7 +382,7 @@ export default function App() {
 
       return matchesType && matchesAltitude && matchesExposure && matchesSignal && matchesWater && matchesRoof && matchesElectricity && matchesFireplace;
     });
-  }, [allPois, selectedType, altitudeRange, selectedExposure, filterSignal, filterWater, filterRoof, filterElectricity, filterFireplace]);
+  }, [allPois, selectedType, altitudeRange, selectedExposures, filterSignal, filterWater, filterRoof, filterElectricity, filterFireplace]);
 
   // --- Network Listener ---
   useEffect(() => {
@@ -348,12 +411,9 @@ export default function App() {
 
       const onMoveEnd = () => {
         if (debounceRef.current) clearTimeout(debounceRef.current);
-        // Reduced debounce time for snappier feel (300ms)
         debounceRef.current = setTimeout(() => {
-          if (map.getZoom() >= 9) { 
              executeFetch();
-          }
-        }, 300); 
+        }, 600); 
       };
 
       map.on('moveend', onMoveEnd);
@@ -375,18 +435,51 @@ export default function App() {
 
       filteredPois.forEach(poi => {
         const isSelected = selectedPoi?.id === poi.id;
+        
+        // --- POPUP HTML CONTENT (UPDATED FOR DARK THEME) ---
+        // Uses text-zinc-100 and text-zinc-400 for better contrast on dark bg
+        const popupContent = `
+            <div class="font-sans p-1 min-w-[150px]">
+                <h3 class="font-bold text-sm text-zinc-100 mb-0.5">${poi.name}</h3>
+                <div class="flex items-center gap-2 text-[10px] text-zinc-400 mb-2 uppercase tracking-wide">
+                    <span>${poi.type}</span> • <span>${poi.altitude}m</span>
+                </div>
+                <button 
+                    onclick="window.openMountProDetails()"
+                    class="w-full bg-orange-600 hover:bg-orange-500 text-white text-xs font-bold py-2 rounded-md transition-colors flex items-center justify-center gap-1.5"
+                >
+                   <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+                   Apri Scheda
+                </button>
+            </div>
+        `;
+
         if (markers.has(poi.id)) {
           const marker = markers.get(poi.id)!;
           marker.setIcon(createCustomIcon(poi.type, isSelected));
-          marker.setZIndexOffset(isSelected ? 1000 : 0);
+          marker.setZIndexOffset(isSelected ? 2000 : 0);
+          
+          // Update popup content if needed (optional optimization)
+          if (!marker.getPopup()) {
+             marker.bindPopup(popupContent, { closeButton: false, offset: [0, -6] });
+          }
+          
         } else {
           const marker = L.marker([poi.coordinates.lat, poi.coordinates.lng], {
             icon: createCustomIcon(poi.type, isSelected)
           }).addTo(map);
+          
+          marker.bindPopup(popupContent, { closeButton: false, offset: [0, -6] });
+
           marker.on('click', () => {
+            // 1. Select the POI (enlarges icon)
             setSelectedPoi(poi);
-            map.flyTo([poi.coordinates.lat, poi.coordinates.lng], map.getZoom(), { duration: 0.5 });
+            // 2. Open the popup (Leaflet handles this mostly, but good to be explicit)
+            marker.openPopup();
+            // 3. IMPORTANT: Close the detail panel initially, wait for user to click button in popup
+            setIsDetailPanelOpen(false);
           });
+          
           markers.set(poi.id, marker);
         }
       });
@@ -445,19 +538,23 @@ export default function App() {
   const fetchLiveInfo = async (poi: POI) => {
     if (isOffline) return;
     setIsLoadingLive(true);
-    setLiveInfo(null); // Reset previous info immediately to avoid stale data
+    setLiveInfo(null);
     const data = await getLiveOutdoorInfo(poi);
     setLiveInfo(data);
     setIsLoadingLive(false);
   };
 
   useEffect(() => {
-    if (selectedPoi && !isOffline) fetchLiveInfo(selectedPoi);
-  }, [selectedPoi, isOffline]);
+    // Only fetch if POI is selected AND detail panel is open
+    if (selectedPoi && isDetailPanelOpen && !isOffline) {
+        fetchLiveInfo(selectedPoi);
+    }
+  }, [selectedPoi, isDetailPanelOpen, isOffline]);
 
   const resetFilters = () => {
     setSelectedType('All');
     setAltitudeRange({ min: 0, max: 4810 });
+    setSelectedExposures([]); // Reset to "All" (empty array)
     setFilterWater(false);
     setFilterRoof(false);
     setFilterElectricity(false);
@@ -469,67 +566,143 @@ export default function App() {
     ? calculateDaylight(liveInfo.data.sunrise, liveInfo.data.sunset) 
     : null;
 
+  // --- Helper to calculate slider positions ---
+  const minPos = useMemo(() => {
+    return Math.min(Math.max((altitudeRange.min / 4810) * 100, 0), 100);
+  }, [altitudeRange.min]);
+
+  const maxPos = useMemo(() => {
+    return Math.min(Math.max((altitudeRange.max / 4810) * 100, 0), 100);
+  }, [altitudeRange.max]);
+
+  // Toggle Exposure Selection
+  const toggleExposure = (exp: Exposure) => {
+    setSelectedExposures(prev => {
+      if (prev.includes(exp)) {
+        return prev.filter(e => e !== exp);
+      } else {
+        return [...prev, exp];
+      }
+    });
+  };
+
   return (
     <div className="flex h-screen w-full bg-zinc-950 overflow-hidden text-zinc-200 font-sans">
       
-      {/* Sidebar */}
+      {/* Sidebar - Note: pointer-events-none on container to allow clicking "outside" (on map) */}
       <aside 
-        className={`fixed inset-0 z-[5000] w-full h-full sm:max-w-md ml-auto bg-zinc-900 transition-transform duration-300 ease-in-out flex flex-col border-l border-zinc-800 ${
+        className={`fixed inset-0 z-[5000] w-full h-full sm:max-w-md ml-auto bg-transparent transition-transform duration-300 ease-in-out flex flex-col pointer-events-none ${
           isSidebarOpen ? 'translate-x-0' : 'translate-x-full'
         }`}
       >
-        <div className="p-4 border-b border-zinc-800 flex items-center justify-between bg-zinc-900 shrink-0">
-          <button 
-             onClick={() => setIsSidebarOpen(false)} 
-             className="flex items-center gap-1 text-zinc-300 hover:text-white transition-colors p-2 rounded-lg hover:bg-zinc-800"
-          >
-             <ChevronLeft className="w-5 h-5" />
-             <span className="text-sm font-medium">Indietro</span>
-          </button>
-          <h1 className="text-lg font-bold">Filtri</h1>
-        </div>
-        <div className="flex-1 overflow-y-auto p-6 space-y-8">
-           <div className="flex justify-between items-center">
-               <h3 className="text-sm font-bold text-zinc-500 uppercase">Impostazioni</h3>
-               <button onClick={resetFilters} className="text-xs text-orange-500">Reset</button>
-           </div>
-           
-           <div className="space-y-4">
-            <h3 className="text-xs font-bold text-zinc-500 uppercase">Tipologia</h3>
-            <div className="flex flex-wrap gap-3">
-              <button onClick={() => setSelectedType('All')} className={`flex-1 px-4 py-3 rounded-lg text-sm border ${selectedType === 'All' ? 'bg-zinc-100 text-black' : 'bg-zinc-800'}`}>Tutti</button>
-              <button onClick={() => setSelectedType(POIType.BIVOUAC)} className={`flex-1 px-4 py-3 rounded-lg text-sm border ${selectedType === POIType.BIVOUAC ? 'bg-orange-600 border-orange-600' : 'bg-zinc-800 border-zinc-700'}`}>Bivacchi</button>
-              <button onClick={() => setSelectedType(POIType.FOUNTAIN)} className={`flex-1 px-4 py-3 rounded-lg text-sm border ${selectedType === POIType.FOUNTAIN ? 'bg-blue-600 border-blue-600' : 'bg-zinc-800 border-zinc-700'}`}>Fontane</button>
-            </div>
-           </div>
-
-           <div className="space-y-4">
-             <h3 className="text-xs font-bold text-zinc-500 uppercase">Altitudine</h3>
-             <input type="range" min="0" max="4810" value={altitudeRange.min} onChange={(e) => setAltitudeRange(prev => ({...prev, min: Number(e.target.value)}))} className="w-full accent-orange-600"/>
-             <div className="flex justify-between text-xs text-zinc-400"><span>{altitudeRange.min}m</span><span>4810m</span></div>
-           </div>
-
-           {/* Expanded Filters Grid */}
-           <div className="space-y-4">
-             <h3 className="text-xs font-bold text-zinc-500 uppercase">Servizi & Dotazioni</h3>
-             <div className="grid grid-cols-2 gap-3">
-               <button onClick={() => setFilterWater(!filterWater)} className={`p-4 border rounded-xl flex flex-col items-center justify-center gap-2 transition-all ${filterWater ? 'bg-blue-500/20 border-blue-500 text-blue-400' : 'bg-zinc-800 border-zinc-700 text-zinc-400'}`}>
-                  <Droplets size={20}/> <span className="text-xs">Acqua</span>
-               </button>
-               <button onClick={() => setFilterRoof(!filterRoof)} className={`p-4 border rounded-xl flex flex-col items-center justify-center gap-2 transition-all ${filterRoof ? 'bg-emerald-500/20 border-emerald-500 text-emerald-400' : 'bg-zinc-800 border-zinc-700 text-zinc-400'}`}>
-                  <Home size={20}/> <span className="text-xs">Coperto</span>
-               </button>
-               <button onClick={() => setFilterElectricity(!filterElectricity)} className={`p-4 border rounded-xl flex flex-col items-center justify-center gap-2 transition-all ${filterElectricity ? 'bg-yellow-500/20 border-yellow-500 text-yellow-400' : 'bg-zinc-800 border-zinc-700 text-zinc-400'}`}>
-                  <Zap size={20}/> <span className="text-xs">Elettricità</span>
-               </button>
-               <button onClick={() => setFilterFireplace(!filterFireplace)} className={`p-4 border rounded-xl flex flex-col items-center justify-center gap-2 transition-all ${filterFireplace ? 'bg-red-500/20 border-red-500 text-red-400' : 'bg-zinc-800 border-zinc-700 text-zinc-400'}`}>
-                  <Flame size={20}/> <span className="text-xs">Stufa/Camino</span>
-               </button>
-               <button onClick={() => setFilterSignal(!filterSignal)} className={`p-4 border rounded-xl flex flex-col items-center justify-center gap-2 col-span-2 transition-all ${filterSignal ? 'bg-purple-500/20 border-purple-500 text-purple-400' : 'bg-zinc-800 border-zinc-700 text-zinc-400'}`}>
-                  <SignalHigh size={20}/> <span className="text-xs">Copertura Mobile</span>
-               </button>
+        {/* Inner Content - pointer-events-auto to capture clicks inside */}
+        <div ref={sidebarContentRef} className="h-full w-full bg-zinc-900 border-l border-zinc-800 flex flex-col pointer-events-auto shadow-2xl">
+          <div className="p-4 border-b border-zinc-800 flex items-center justify-between bg-zinc-900 shrink-0">
+            <button 
+               onClick={() => setIsSidebarOpen(false)} 
+               className="flex items-center gap-1 text-zinc-300 hover:text-white transition-colors p-2 rounded-lg hover:bg-zinc-800"
+            >
+               <ChevronLeft className="w-5 h-5" />
+               <span className="text-sm font-medium">Indietro</span>
+            </button>
+            <h1 className="text-lg font-bold">Filtri</h1>
+          </div>
+          <div className="flex-1 overflow-y-auto p-6 space-y-8">
+             <div className="flex justify-between items-center">
+                 <h3 className="text-sm font-bold text-zinc-500 uppercase">Impostazioni</h3>
+                 <button onClick={resetFilters} className="text-xs text-orange-500">Reset</button>
              </div>
-           </div>
+             
+             <div className="space-y-4">
+              <h3 className="text-xs font-bold text-zinc-500 uppercase">Tipologia</h3>
+              <div className="flex flex-wrap gap-3">
+                <button onClick={() => setSelectedType('All')} className={`flex-1 px-4 py-3 rounded-lg text-sm border ${selectedType === 'All' ? 'bg-zinc-100 text-black' : 'bg-zinc-800'}`}>Tutti</button>
+                <button onClick={() => setSelectedType(POIType.BIVOUAC)} className={`flex-1 px-4 py-3 rounded-lg text-sm border ${selectedType === POIType.BIVOUAC ? 'bg-orange-600 border-orange-600' : 'bg-zinc-800 border-zinc-700'}`}>Bivacchi</button>
+                <button onClick={() => setSelectedType(POIType.FOUNTAIN)} className={`flex-1 px-4 py-3 rounded-lg text-sm border ${selectedType === POIType.FOUNTAIN ? 'bg-blue-600 border-blue-600' : 'bg-zinc-800 border-zinc-700'}`}>Fontane</button>
+              </div>
+             </div>
+
+             <div className="space-y-5">
+               <div className="flex justify-between items-center">
+                 <h3 className="text-xs font-bold text-zinc-500 uppercase">Altitudine</h3>
+                 <span className="text-xs font-mono text-orange-500">{altitudeRange.min}m - {altitudeRange.max}m</span>
+               </div>
+               
+               {/* Dual Range Slider on Same Line */}
+               <div className="relative h-6 w-full range-slider-container">
+                 {/* Background Track (Grey) */}
+                 <div className="absolute top-2.5 left-0 w-full h-1 bg-zinc-700 rounded z-0"></div>
+                 
+                 {/* Active Range Track (Orange) */}
+                 <div 
+                   className="absolute top-2.5 h-1 bg-orange-600 rounded z-10" 
+                   style={{ left: `${minPos}%`, width: `${maxPos - minPos}%` }}
+                 ></div>
+
+                 {/* Min Slider */}
+                 <input 
+                    type="range" 
+                    min="0" 
+                    max="4810" 
+                    value={altitudeRange.min} 
+                    onChange={(e) => {
+                      const val = Number(e.target.value);
+                      const newMin = Math.min(val, altitudeRange.max - 100);
+                      setAltitudeRange(prev => ({...prev, min: newMin}));
+                    }} 
+                    className="absolute top-0 w-full appearance-none bg-transparent pointer-events-none"
+                 />
+
+                 {/* Max Slider */}
+                 <input 
+                    type="range" 
+                    min="0" 
+                    max="4810" 
+                    value={altitudeRange.max} 
+                    onChange={(e) => {
+                      const val = Number(e.target.value);
+                      const newMax = Math.max(val, altitudeRange.min + 100);
+                      setAltitudeRange(prev => ({...prev, max: newMax}));
+                    }} 
+                    className="absolute top-0 w-full appearance-none bg-transparent pointer-events-none"
+                 />
+               </div>
+             </div>
+
+             {/* Exposure Filter (Multi-Select) */}
+             <div className="space-y-4">
+              <h3 className="text-xs font-bold text-zinc-500 uppercase">Esposizione</h3>
+              <div className="grid grid-cols-3 gap-2">
+                <button onClick={() => setSelectedExposures([])} className={`px-2 py-2 rounded-lg text-xs border ${selectedExposures.length === 0 ? 'bg-zinc-100 text-black' : 'bg-zinc-800 border-zinc-700'}`}>Tutti</button>
+                <button onClick={() => toggleExposure(Exposure.NORTH)} className={`px-2 py-2 rounded-lg text-xs border ${selectedExposures.includes(Exposure.NORTH) ? 'bg-blue-900/40 text-blue-400 border-blue-500' : 'bg-zinc-800 border-zinc-700'}`}>Nord</button>
+                <button onClick={() => toggleExposure(Exposure.SOUTH)} className={`px-2 py-2 rounded-lg text-xs border ${selectedExposures.includes(Exposure.SOUTH) ? 'bg-orange-900/40 text-orange-400 border-orange-500' : 'bg-zinc-800 border-zinc-700'}`}>Sud</button>
+                <button onClick={() => toggleExposure(Exposure.EAST)} className={`px-2 py-2 rounded-lg text-xs border ${selectedExposures.includes(Exposure.EAST) ? 'bg-yellow-900/40 text-yellow-400 border-yellow-500' : 'bg-zinc-800 border-zinc-700'}`}>Est</button>
+                <button onClick={() => toggleExposure(Exposure.WEST)} className={`px-2 py-2 rounded-lg text-xs border ${selectedExposures.includes(Exposure.WEST) ? 'bg-purple-900/40 text-purple-400 border-purple-500' : 'bg-zinc-800 border-zinc-700'}`}>Ovest</button>
+              </div>
+             </div>
+
+             {/* Expanded Filters Grid */}
+             <div className="space-y-4">
+               <h3 className="text-xs font-bold text-zinc-500 uppercase">Servizi & Dotazioni</h3>
+               <div className="grid grid-cols-2 gap-3">
+                 <button onClick={() => setFilterWater(!filterWater)} className={`p-4 border rounded-xl flex flex-col items-center justify-center gap-2 transition-all ${filterWater ? 'bg-blue-500/20 border-blue-500 text-blue-400' : 'bg-zinc-800 border-zinc-700 text-zinc-400'}`}>
+                    <Droplets size={20}/> <span className="text-xs">Acqua</span>
+                 </button>
+                 <button onClick={() => setFilterRoof(!filterRoof)} className={`p-4 border rounded-xl flex flex-col items-center justify-center gap-2 transition-all ${filterRoof ? 'bg-emerald-500/20 border-emerald-500 text-emerald-400' : 'bg-zinc-800 border-zinc-700 text-zinc-400'}`}>
+                    <Home size={20}/> <span className="text-xs">Coperto</span>
+                 </button>
+                 <button onClick={() => setFilterElectricity(!filterElectricity)} className={`p-4 border rounded-xl flex flex-col items-center justify-center gap-2 transition-all ${filterElectricity ? 'bg-yellow-500/20 border-yellow-500 text-yellow-400' : 'bg-zinc-800 border-zinc-700 text-zinc-400'}`}>
+                    <Zap size={20}/> <span className="text-xs">Elettricità</span>
+                 </button>
+                 <button onClick={() => setFilterFireplace(!filterFireplace)} className={`p-4 border rounded-xl flex flex-col items-center justify-center gap-2 transition-all ${filterFireplace ? 'bg-red-500/20 border-red-500 text-red-400' : 'bg-zinc-800 border-zinc-700 text-zinc-400'}`}>
+                    <Flame size={20}/> <span className="text-xs">Stufa/Camino</span>
+                 </button>
+                 <button onClick={() => setFilterSignal(!filterSignal)} className={`p-4 border rounded-xl flex flex-col items-center justify-center gap-2 col-span-2 transition-all ${filterSignal ? 'bg-purple-500/20 border-purple-500 text-purple-400' : 'bg-zinc-800 border-zinc-700 text-zinc-400'}`}>
+                    <SignalHigh size={20}/> <span className="text-xs">Copertura Mobile</span>
+                 </button>
+               </div>
+             </div>
+          </div>
         </div>
       </aside>
 
@@ -537,8 +710,8 @@ export default function App() {
       <main className="w-full h-full relative bg-zinc-950 overflow-hidden">
         
         {/* Transparent Header Overlay with Floating Glass Elements - Perfectly Aligned */}
-        {/* Row 1: Main Controls */}
-        <header className="absolute top-4 left-4 right-4 z-[2000] flex items-center justify-between gap-3 pointer-events-none">
+        {/* Lowered top from top-2 to top-6 */}
+        <header className="absolute top-6 left-4 right-4 z-[2000] flex items-center justify-between gap-3 pointer-events-none">
           <button 
              onClick={() => setViewMode(viewMode === 'list' ? 'map' : 'list')}
              className="pointer-events-auto w-10 h-10 flex items-center justify-center bg-zinc-900/90 border border-zinc-700/50 rounded-xl text-zinc-300 hover:text-white shadow-lg backdrop-blur-md shrink-0 transition-colors"
@@ -567,9 +740,18 @@ export default function App() {
 
         <div className="w-full h-full overflow-y-auto p-0 scroll-smooth bg-zinc-900">
           {viewMode === 'list' ? (
-            <div className="p-6 pt-24 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6 pb-20">
+            /* Updated Padding to pt-36 to accommodate lowered header */
+            <div className="p-6 pt-36 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6 pb-20">
                {filteredPois.length > 0 ? filteredPois.map(poi => (
-                  <div key={poi.id} onClick={() => setSelectedPoi(poi)} className="bg-zinc-900/90 backdrop-blur-sm border border-zinc-700/50 rounded-2xl overflow-hidden cursor-pointer hover:border-zinc-500 shadow-xl group transition-colors">
+                  <div 
+                    key={poi.id} 
+                    onClick={() => {
+                        setSelectedPoi(poi);
+                        setIsDetailPanelOpen(true); // From list we open full details immediately
+                        setViewMode('map'); 
+                    }} 
+                    className="bg-zinc-900/90 backdrop-blur-sm border border-zinc-700/50 rounded-2xl overflow-hidden cursor-pointer hover:border-zinc-500 shadow-xl group transition-colors"
+                  >
                     <div className="h-44 bg-zinc-800 relative">
                        <img src={poi.imageUrl} className="w-full h-full object-cover opacity-80 group-hover:opacity-100 transition-opacity"/>
                        <div className="absolute top-2 right-2 flex gap-1">
@@ -596,8 +778,8 @@ export default function App() {
                <div ref={mapContainerRef} className="h-full w-full bg-zinc-900" />
                
                {/* --- Row 2: Secondary Controls (Compass, Status, Layers) --- */}
-               {/* Positioned at top-16 (64px) which allows gap below the 40px header buttons */}
-               <div className="absolute top-16 left-4 right-4 z-[1000] flex justify-between items-start pointer-events-none">
+               {/* Positioned at top-20 (80px) which allows gap below the 40px header buttons (at top-6) */}
+               <div className="absolute top-20 left-4 right-4 z-[1000] flex justify-between items-start pointer-events-none">
                   {/* Compass */}
                   <div className="pointer-events-auto bg-zinc-900/90 backdrop-blur-md border border-zinc-700/50 w-10 h-10 flex items-center justify-center rounded-xl shadow-lg">
                       <div style={{ transform: `rotate(${-heading}deg)`, transition: 'transform 0.3s ease-out' }}>
@@ -615,8 +797,8 @@ export default function App() {
                     )}
                   </div>
 
-                  {/* Layers Control */}
-                  <div className="pointer-events-auto relative">
+                  {/* Layers Control (Wrapped in Ref for Click Outside) */}
+                  <div ref={layersMenuRef} className="pointer-events-auto relative">
                       <button 
                         onClick={() => setIsLayersMenuOpen(!isLayersMenuOpen)}
                         className="w-10 h-10 bg-zinc-900/90 backdrop-blur-md border border-zinc-700/50 rounded-xl flex items-center justify-center text-white hover:bg-zinc-800 shadow-xl transition-colors"
@@ -652,11 +834,11 @@ export default function App() {
           )}
         </div>
 
-        {/* Detail Panel */}
-        {selectedPoi && (
-          <div className="absolute inset-y-0 right-0 w-full sm:w-[450px] bg-zinc-950 border-l border-zinc-800 shadow-2xl z-[3000] flex flex-col animate-in slide-in-from-right duration-300">
+        {/* Detail Panel - ONLY SHOW IF POI SELECTED *AND* PANEL OPEN */}
+        {selectedPoi && isDetailPanelOpen && (
+          <div ref={detailPanelRef} className="absolute inset-y-0 right-0 w-full sm:w-[450px] bg-zinc-950 border-l border-zinc-800 shadow-2xl z-[3000] flex flex-col animate-in slide-in-from-right duration-300">
              <div className="p-4 border-b border-zinc-800 flex justify-between items-center bg-zinc-950/95 sticky top-0 backdrop-blur-md z-10">
-              <button onClick={() => setSelectedPoi(null)} className="p-2 hover:bg-zinc-800 rounded-full transition-colors text-zinc-400 hover:text-white">
+              <button onClick={() => setIsDetailPanelOpen(false)} className="p-2 hover:bg-zinc-800 rounded-full transition-colors text-zinc-400 hover:text-white">
                 <ChevronLeft className="w-5 h-5" /> 
               </button>
               <h3 className="font-bold uppercase tracking-widest text-[10px] text-zinc-500 flex items-center gap-2">
@@ -681,13 +863,36 @@ export default function App() {
                          {selectedPoi.altitude > 0 ? `${selectedPoi.altitude}m` : <span className="text-zinc-500 text-sm">Ricerca in corso...</span>}
                        </div>
                      </div>
+                     {/* Exposure Card Added */}
                      <div className="p-4 bg-zinc-900 rounded-2xl border border-zinc-800 flex flex-col">
-                       <span className="text-[10px] text-zinc-500 uppercase font-bold">Dotazioni</span>
-                       <div className="flex gap-2 mt-1">
-                          {selectedPoi.hasWater ? <Droplets className="w-5 h-5 text-blue-400" /> : <Droplets className="w-5 h-5 text-zinc-700" />}
-                          {selectedPoi.hasRoof ? <Home className="w-5 h-5 text-emerald-400" /> : <Home className="w-5 h-5 text-zinc-700" />}
-                          {selectedPoi.hasElectricity ? <Zap className="w-5 h-5 text-yellow-400" /> : <Zap className="w-5 h-5 text-zinc-700" />}
-                          {selectedPoi.hasFireplace ? <Flame className="w-5 h-5 text-red-400" /> : <Flame className="w-5 h-5 text-zinc-700" />}
+                       <span className="text-[10px] text-zinc-500 uppercase font-bold">Esposizione</span>
+                       <div className="text-lg font-bold flex items-center gap-2 text-white">
+                         <Sun className="w-5 h-5 text-yellow-500" />
+                         {selectedPoi.exposure}
+                       </div>
+                     </div>
+
+                     {/* AMENITIES SECTION - UPDATED TO BE DESCRIPTIVE */}
+                     <div className="p-4 bg-zinc-900 rounded-2xl border border-zinc-800 flex flex-col col-span-2">
+                       <span className="text-[10px] text-zinc-500 uppercase font-bold mb-3">Dotazioni Disponibili</span>
+                       <div className="grid grid-cols-2 gap-2">
+                          {selectedPoi.hasWater && (
+                              <div className="flex items-center gap-2 text-blue-400 text-sm font-medium"><Droplets size={16}/> Acqua Potabile</div>
+                          )}
+                          {selectedPoi.hasRoof && (
+                              <div className="flex items-center gap-2 text-emerald-400 text-sm font-medium"><Home size={16}/> Struttura Chiusa</div>
+                          )}
+                          {selectedPoi.hasElectricity && (
+                              <div className="flex items-center gap-2 text-yellow-400 text-sm font-medium"><Zap size={16}/> Elettricità</div>
+                          )}
+                          {selectedPoi.hasFireplace && (
+                              <div className="flex items-center gap-2 text-red-400 text-sm font-medium"><Flame size={16}/> Stufa/Camino</div>
+                          )}
+                          
+                          {/* If nothing is present */}
+                          {(!selectedPoi.hasWater && !selectedPoi.hasRoof && !selectedPoi.hasElectricity && !selectedPoi.hasFireplace) && (
+                              <div className="text-zinc-500 text-xs italic col-span-2">Nessuna dotazione particolare segnalata.</div>
+                          )}
                        </div>
                      </div>
                   </div>
@@ -702,26 +907,27 @@ export default function App() {
                       <h4 className="text-xs font-bold text-emerald-500 uppercase mb-2 flex items-center gap-2">
                         <Smartphone className="w-4 h-4"/> Connettività & Rete
                       </h4>
-                      <div className="p-5 bg-zinc-900/80 border border-zinc-800 rounded-2xl">
-                         {isLoadingLive ? (
-                           <div className="text-center text-xs text-zinc-500 py-2">Verifica copertura in corso...</div>
-                         ) : liveInfo?.data?.connectivity_info ? (
+                      <div className="p-5 bg-zinc-900/80 border border-zinc-800 rounded-2xl transition-all duration-300">
+                         {isLoadingLive && !liveInfo ? (
+                           <div className="text-center text-xs text-zinc-500 py-2 flex items-center justify-center gap-2">
+                             <Loader2 className="w-3 h-3 animate-spin"/> Verifica copertura in corso...
+                           </div>
+                         ) : (
                              <div className="flex items-center justify-between">
                                  <div>
                                    <div className="text-2xl font-bold text-white flex items-end gap-2">
-                                     {liveInfo.data.connectivity_info.type}
+                                     {liveInfo?.data?.connectivity_info ? liveInfo.data.connectivity_info.type : selectedPoi.signal}
                                      <span className="text-xs text-zinc-400 font-normal mb-1">
-                                       {liveInfo.data.connectivity_info.description}
+                                       {liveInfo?.data?.connectivity_info?.description || "Copertura stimata"}
                                      </span>
                                    </div>
                                  </div>
-                                 <div className="flex flex-col items-center">
-                                    {renderSignalIcon(liveInfo.data.connectivity_info.strength)}
-                                    <span className="text-[10px] uppercase font-bold text-zinc-500 mt-1">Segnale</span>
+                                 <div className="flex flex-col items-center gap-1">
+                                    {/* USE NEW VISUAL SIGNAL BARS */}
+                                    {renderSignalBars(getSignalLevel(selectedPoi.signal, liveInfo?.data?.connectivity_info))}
+                                    <span className="text-[10px] uppercase font-bold text-zinc-500">Segnale</span>
                                  </div>
                              </div>
-                         ) : (
-                           <div className="text-center text-xs text-zinc-500 py-2">Dati non disponibili.</div>
                          )}
                       </div>
                   </div>
