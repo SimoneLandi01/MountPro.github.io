@@ -1,4 +1,3 @@
-
 // ... (imports remain the same)
 import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { 
@@ -38,13 +37,16 @@ import {
   Sunrise,
   Sunset,
   ArrowRight,
-  Tent
+  Tent,
+  Database,
+  Heart // Imported Heart icon
 } from 'lucide-react';
 import L from 'leaflet';
 import { POI, POIType, Exposure, SignalStrength } from './types';
 import { MOCK_POIS } from './constants';
 import { getLiveOutdoorInfo, AIResponse } from './services/geminiService';
 import { fetchOsmPois, searchOsmPoisByName } from './services/osmService';
+import { dbService } from './services/dbService';
 
 function useOnClickOutside(ref: React.RefObject<HTMLElement>, handler: (event: MouseEvent | TouchEvent) => void) {
   useEffect(() => {
@@ -61,9 +63,11 @@ function useOnClickOutside(ref: React.RefObject<HTMLElement>, handler: (event: M
   }, [ref, handler]);
 }
 
-const createCustomIcon = (type: POIType, isSelected: boolean) => {
+const createCustomIcon = (type: POIType, isSelected: boolean, isFavorite: boolean) => {
   const size = type === POIType.BIVOUAC ? (isSelected ? 44 : 34) : (isSelected ? 48 : 28);
-  const color = type === POIType.BIVOUAC ? (isSelected ? '#c2410c' : '#ea580c') : '#3b82f6';
+  // If favorite, use a specific color or border, otherwise standard colors
+  const baseColor = type === POIType.BIVOUAC ? (isSelected ? '#c2410c' : '#ea580c') : '#3b82f6';
+  const color = isFavorite ? '#ef4444' : baseColor; // Red if favorite
   
   return L.divIcon({
     className: 'custom-poi-marker',
@@ -74,6 +78,7 @@ const createCustomIcon = (type: POIType, isSelected: boolean) => {
             ? `<path d="M12 2C7.58 2 4 5.58 4 10C4 14.42 12 22 12 22C12 22 20 14.42 20 10C20 5.58 16.42 2 12 2Z" fill="${color}" stroke="white" stroke-width="1.5"/><path d="M8 10.5L12 7L16 10.5V15H8V10.5Z" fill="white"/><rect x="10.5" y="13" width="3" height="3" fill="${color}"/>`
             : `<circle cx="12" cy="12" r="10" fill="${color}" stroke="white" stroke-width="2"/><path d="M12 18a5 5 0 0 0 5-5c0-1.4-0.7-2.7-2.1-5.1-1.2-1.9-2.1-2.7-2.9-4.5-0.8 1.8-1.7 2.6-2.9 4.5-1.4 2.4-2.1 3.7-2.1 5.1a5 5 0 0 0 5 5z" fill="white"/>`
           }
+          ${isFavorite ? `<circle cx="18" cy="6" r="3" fill="#ef4444" stroke="white" stroke-width="1"/>` : ''}
         </svg>
       </div>
     `,
@@ -92,17 +97,59 @@ export default function App() {
   const [isLoadingLive, setIsLoadingLive] = useState(false);
   const [isOffline, setIsOffline] = useState(!navigator.onLine);
   const [isDownloading, setIsDownloading] = useState(false);
-  const [downloadProgress, setDownloadProgress] = useState(0);
+  const [downloadProgress, setDownloadProgress] = useState<'idle' | 'fetching' | 'saving' | 'done'>('idle');
+  const [downloadCount, setDownloadCount] = useState(0);
 
-  // CHANGED: Initial state is empty array [], fallback to MOCK_POIS removed to avoid confusion
-  const [allPois, setAllPois] = useState<POI[]>(() => {
-    const saved = localStorage.getItem('mountpro_pois');
-    return saved ? JSON.parse(saved) : [];
+  // Initial state is empty, populated by DB on mount
+  const [allPois, setAllPois] = useState<POI[]>([]);
+  
+  // Favorites State
+  const [favorites, setFavorites] = useState<Set<string>>(() => {
+     const saved = localStorage.getItem('mountpro_favorites');
+     return new Set(saved ? JSON.parse(saved) : []);
   });
+  const [showFavoritesOnly, setShowFavoritesOnly] = useState(false);
+  
+  // Store map state to persist across view changes
+  const mapViewState = useRef({ center: { lat: 46.2, lng: 11.4 }, zoom: 9 });
 
+  // Load from DB on start
   useEffect(() => {
-    localStorage.setItem('mountpro_pois', JSON.stringify(allPois));
-  }, [allPois]);
+    const loadData = async () => {
+      try {
+        const storedPois = await dbService.getAllPois();
+        if (storedPois.length > 0) {
+          setAllPois(storedPois);
+        }
+      } catch (e) {
+        console.error("Failed to load from DB", e);
+      }
+    };
+    loadData();
+  }, []);
+
+  // Sync state to DB whenever it changes significantly (optional, but good for persistence)
+  // We prefer explicit saving, but this helps keep sync
+  const saveToDb = async (pois: POI[]) => {
+     if (pois.length > 0) {
+        await dbService.savePois(pois);
+     }
+  };
+
+  // Toggle Favorite Function
+  const toggleFavorite = async (e: React.MouseEvent, poi: POI) => {
+     e.stopPropagation();
+     const newFavs = new Set(favorites);
+     if (newFavs.has(poi.id)) {
+        newFavs.delete(poi.id);
+     } else {
+        newFavs.add(poi.id);
+        // CRITICAL: When favoring, ensure it is saved to Offline DB immediately
+        await dbService.savePois([poi]);
+     }
+     setFavorites(newFavs);
+     localStorage.setItem('mountpro_favorites', JSON.stringify([...newFavs]));
+  };
 
   // Expose function for Leaflet Popups
   useEffect(() => {
@@ -175,18 +222,47 @@ export default function App() {
 
   const downloadMapArea = async () => {
     if (!mapRef.current || isOffline) return;
+    
     setIsDownloading(true);
-    setDownloadProgress(0);
+    setDownloadProgress('fetching');
+    setDownloadCount(0);
+
+    const b = mapRef.current.getBounds();
+    
     try {
-      const cache = await caches.open('peakpoint-v2-offline-maps');
-      for (let i = 0; i <= 100; i += 20) {
-        setDownloadProgress(i);
-        await new Promise(r => setTimeout(r, 200));
-      }
-      setIsDownloading(false);
-      alert("Area salvata correttamente!");
+      // 1. Fetch ALL types for the area, not just the selected filter
+      const newPois = await fetchOsmPois({ 
+        south: b.getSouth(), 
+        west: b.getWest(), 
+        north: b.getNorth(), 
+        east: b.getEast() 
+      }, 'All'); // Force 'All' to download everything in view
+
+      setDownloadCount(newPois.length);
+      setDownloadProgress('saving');
+
+      // 2. Save to IndexedDB
+      await dbService.savePois(newPois);
+
+      // 3. Update State (Merge with existing)
+      setAllPois(prev => {
+        const ids = new Set(prev.map(p => p.id));
+        const merged = [...prev, ...newPois.filter(p => !ids.has(p.id))];
+        return merged;
+      });
+
+      setDownloadProgress('done');
+      setTimeout(() => {
+         setIsDownloading(false);
+         setDownloadProgress('idle');
+         setIsLayersMenuOpen(false);
+      }, 2000);
+
     } catch (e) {
+      console.error("Download failed", e);
       setIsDownloading(false);
+      setDownloadProgress('idle');
+      alert("Errore durante il download dell'area.");
     }
   };
 
@@ -210,7 +286,9 @@ export default function App() {
     if (results.length > 0) {
       setAllPois(prev => {
         const existingIds = new Set(prev.map(p => p.id));
-        return [...prev, ...results.filter(p => !existingIds.has(p.id))];
+        const combined = [...prev, ...results.filter(p => !existingIds.has(p.id))];
+        saveToDb(combined); // Persist search results
+        return combined;
       });
       setSelectedPoi(results[0]);
       setIsDetailPanelOpen(true);
@@ -221,6 +299,9 @@ export default function App() {
 
   const filteredPois = useMemo(() => {
     return allPois.filter(p => {
+      // Favorites Filter
+      if (showFavoritesOnly && !favorites.has(p.id)) return false;
+
       const t = selectedType === 'All' || p.type === selectedType;
       const a = p.altitude >= minAltitude && p.altitude <= maxAltitude;
       const e = selectedExposures.length === 0 || selectedExposures.includes(p.exposure);
@@ -228,7 +309,7 @@ export default function App() {
       const r = !filterRoof || p.hasRoof;
       return t && a && e && w && r;
     });
-  }, [allPois, selectedType, minAltitude, maxAltitude, selectedExposures, filterWater, filterRoof]);
+  }, [allPois, selectedType, minAltitude, maxAltitude, selectedExposures, filterWater, filterRoof, showFavoritesOnly, favorites]);
 
   const executeFetch = async () => {
     if (!mapRef.current || isOfflineRef.current) return;
@@ -238,7 +319,9 @@ export default function App() {
       const newPois = await fetchOsmPois({ south: b.getSouth(), west: b.getWest(), north: b.getNorth(), east: b.getEast() }, selectedTypeRef.current);
       setAllPois(prev => {
         const ids = new Set(prev.map(p => p.id));
-        return [...prev, ...newPois.filter(p => !ids.has(p.id))];
+        const merged = [...prev, ...newPois.filter(p => !ids.has(p.id))];
+        saveToDb(merged); 
+        return merged;
       });
     } finally { setIsSearchingArea(false); }
   };
@@ -248,20 +331,29 @@ export default function App() {
     if (viewMode === 'map' && mapContainerRef.current) {
       if (mapRef.current) return; 
 
-      const map = L.map(mapContainerRef.current, { zoomControl: false, attributionControl: false }).setView([46.2, 11.4], 9);
+      const { center, zoom } = mapViewState.current;
+
+      const map = L.map(mapContainerRef.current, { zoomControl: false, attributionControl: false }).setView([center.lat, center.lng], zoom);
       mapRef.current = map;
       
       L.control.scale({ position: 'bottomleft', imperial: false, metric: true }).addTo(map);
 
       map.on('moveend', () => {
+        const c = map.getCenter();
+        mapViewState.current = { center: { lat: c.lat, lng: c.lng }, zoom: map.getZoom() };
         if (!isOfflineRef.current) executeFetch();
       });
 
+      // Initial fetch if online, otherwise we already loaded DB data in the top useEffect
       if (!isOfflineRef.current) executeFetch();
     }
 
     return () => {
       if (mapRef.current) {
+        // Save state one last time before destruction (though moveend usually catches it)
+        const c = mapRef.current.getCenter();
+        mapViewState.current = { center: { lat: c.lat, lng: c.lng }, zoom: mapRef.current.getZoom() };
+        
         mapRef.current.remove();
         mapRef.current = null;
         markersRef.current.clear();
@@ -280,12 +372,27 @@ export default function App() {
     });
 
     if (mapStyle === 'satellite') {
-      L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', { maxZoom: 19, attribution: 'Esri' }).addTo(mapRef.current);
-      L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager_only_labels/{z}/{x}/{y}{r}.png', { maxZoom: 19, subdomains: 'abcd', opacity: 1 }).addTo(mapRef.current);
-      L.DomUtil.removeClass(mapRef.current.getContainer(), 'dark-tiles');
+      // 1. Base Layer: World Imagery (Satellite)
+      L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', { 
+        maxZoom: 19, 
+        attribution: 'Esri' 
+      }).addTo(mapRef.current);
+
+      // 2. Overlay Layer: World Transportation (Roads & Streets)
+      L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Transportation/MapServer/tile/{z}/{y}/{x}', {
+        maxZoom: 19
+      }).addTo(mapRef.current);
+
+      // 3. Overlay Layer: World Boundaries and Places (Cities, Labels, Points)
+      L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}', {
+        maxZoom: 19
+      }).addTo(mapRef.current);
+
+      // Removed container class manipulation to avoid flipping marker/popup colors
     } else {
+      // className 'dark-tiles' is applied ONLY to the tile layer images by Leaflet
       L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { className: 'dark-tiles', maxZoom: 19 }).addTo(mapRef.current);
-      L.DomUtil.addClass(mapRef.current.getContainer(), 'dark-tiles');
+      // Removed L.DomUtil.addClass(mapRef.current.getContainer(), 'dark-tiles'); which was inverting the whole map
     }
   }, [mapStyle, viewMode]);
 
@@ -302,9 +409,11 @@ export default function App() {
 
       filteredPois.forEach(poi => {
         const isSelected = selectedPoi?.id === poi.id;
+        const isFav = favorites.has(poi.id);
+        
         const popupContent = `
           <div class="px-3 py-2 min-w-[160px] text-zinc-100 font-sans">
-            <h4 class="font-bold text-sm mb-0.5">${poi.name}</h4>
+            <h4 class="font-bold text-sm mb-0.5 pr-4">${poi.name} ${isFav ? '❤️' : ''}</h4>
             <div class="flex items-center gap-2 text-[11px] text-zinc-400 mb-2">
               <span class="bg-zinc-800 px-1.5 py-0.5 rounded text-zinc-300 border border-zinc-700">${poi.altitude}m</span>
               <span>${poi.type}</span>
@@ -317,15 +426,12 @@ export default function App() {
         
         if (markers.has(poi.id)) {
           const m = markers.get(poi.id)!;
-          m.setIcon(createCustomIcon(poi.type, isSelected));
-          m.setZIndexOffset(isSelected ? 1000 : 0);
+          m.setIcon(createCustomIcon(poi.type, isSelected, isFav));
+          m.setZIndexOffset(isSelected ? 1000 : (isFav ? 500 : 0));
         } else {
-          const m = L.marker([poi.coordinates.lat, poi.coordinates.lng], { icon: createCustomIcon(poi.type, isSelected) }).addTo(map);
+          const m = L.marker([poi.coordinates.lat, poi.coordinates.lng], { icon: createCustomIcon(poi.type, isSelected, isFav) }).addTo(map);
           m.bindPopup(popupContent, { closeButton: false, offset: [0, -12] });
           m.on('click', () => { 
-             // IMPORTANT: Force panel to close when clicking a marker.
-             // This prevents "flashing" old content or opening it automatically.
-             // The user must click "Vedi Dettagli" in the popup to open the panel.
              setIsDetailPanelOpen(false);
              setSelectedPoi(poi); 
           });
@@ -333,7 +439,7 @@ export default function App() {
         }
       });
     }
-  }, [filteredPois, selectedPoi, viewMode]);
+  }, [filteredPois, selectedPoi, viewMode, favorites]);
 
   const toggleExposure = (exp: Exposure) => {
     setSelectedExposures(prev => prev.includes(exp) ? prev.filter(e => e !== exp) : [...prev, exp]);
@@ -342,9 +448,27 @@ export default function App() {
   const handleZoomIn = () => { mapRef.current?.zoomIn(); };
   const handleZoomOut = () => { mapRef.current?.zoomOut(); };
 
+  const handleShowOnMap = () => {
+    if (!selectedPoi) return;
+    
+    // Update map state to focus on POI
+    mapViewState.current = { 
+       center: { lat: selectedPoi.coordinates.lat, lng: selectedPoi.coordinates.lng }, 
+       zoom: 16 
+    };
+
+    if (viewMode === 'list') {
+       setViewMode('map');
+    } else {
+       // If already in map view, fly to it
+       mapRef.current?.flyTo([selectedPoi.coordinates.lat, selectedPoi.coordinates.lng], 16);
+    }
+    
+    setIsDetailPanelOpen(false);
+  };
+
   return (
-    // Updated h-screen to h-[100dvh] for better mobile viewport handling
-    <div className="flex h-[100dvh] w-full bg-zinc-950 text-zinc-200 overflow-hidden font-sans relative">
+    <div className="flex flex-col h-full w-full bg-zinc-950 text-zinc-200 overflow-hidden font-sans relative">
       <style>{`
         .leaflet-popup-content-wrapper, .leaflet-popup-tip {
           background-color: #18181b !important;
@@ -381,6 +505,16 @@ export default function App() {
             <button onClick={() => setIsSidebarOpen(false)} className="p-2 hover:bg-zinc-800 rounded-lg text-zinc-400"><X size={20}/></button>
           </div>
           <div className="flex-1 overflow-y-auto p-6 space-y-8">
+            
+            <section>
+              <button onClick={() => setShowFavoritesOnly(!showFavoritesOnly)} className={`w-full flex items-center justify-between p-4 rounded-xl border transition-all ${showFavoritesOnly ? 'bg-red-900/30 border-red-500' : 'bg-zinc-800 border-zinc-700'}`}>
+                 <span className="flex items-center gap-3 font-bold text-sm"><Heart size={18} className={showFavoritesOnly ? "text-red-500 fill-red-500" : "text-zinc-400"}/> Solo i miei Preferiti</span>
+                 <div className={`w-10 h-5 rounded-full relative transition-colors ${showFavoritesOnly ? 'bg-red-500' : 'bg-zinc-600'}`}>
+                       <div className={`absolute top-1 w-3 h-3 bg-white rounded-full transition-all ${showFavoritesOnly ? 'left-6' : 'left-1'}`}/>
+                 </div>
+              </button>
+            </section>
+
             <section>
               <h3 className="text-xs font-bold text-zinc-500 uppercase mb-4 tracking-wider">Tipologia</h3>
               <div className="grid grid-cols-2 gap-2">
@@ -429,6 +563,19 @@ export default function App() {
                 ))}
               </div>
             </section>
+
+             <section>
+               <h3 className="text-xs font-bold text-zinc-500 uppercase mb-4 tracking-wider">Gestione Dati</h3>
+               <button onClick={async () => {
+                  if(confirm("Sei sicuro di voler cancellare tutti i dati salvati?")) {
+                     await dbService.clearAll();
+                     setAllPois([]);
+                     alert("Database svuotato.");
+                  }
+               }} className="w-full py-2 bg-red-900/30 border border-red-800 text-red-400 rounded-lg text-xs font-bold hover:bg-red-900/50">
+                  Svuota Database Locale
+               </button>
+            </section>
           </div>
         </div>
       </aside>
@@ -460,14 +607,19 @@ export default function App() {
              </div>
              
              {/* RIGHT: Filter Button */}
-             <button onClick={() => setIsSidebarOpen(true)} className={`w-11 h-11 bg-zinc-900 border rounded-xl flex items-center justify-center shadow-xl transition-all shrink-0 ${selectedType !== 'All' || minAltitude > 0 || maxAltitude < 4810 || filterWater || filterRoof ? 'border-orange-500 text-orange-500' : 'border-zinc-800 text-zinc-300 hover:text-white'}`}>
+             <button onClick={() => setIsSidebarOpen(true)} className={`w-11 h-11 bg-zinc-900 border rounded-xl flex items-center justify-center shadow-xl transition-all shrink-0 ${selectedType !== 'All' || minAltitude > 0 || maxAltitude < 4810 || filterWater || filterRoof || showFavoritesOnly ? 'border-orange-500 text-orange-500' : 'border-zinc-800 text-zinc-300 hover:text-white'}`}>
                 <Filter size={18}/>
              </button>
           </div>
           
           {/* Active Filter Chips - Solid colors */}
-          {(selectedType !== 'All' || filterWater || filterRoof) && (
+          {(selectedType !== 'All' || filterWater || filterRoof || showFavoritesOnly) && (
             <div className="flex justify-center gap-2 animate-in fade-in slide-in-from-top-2 pointer-events-auto">
+               {showFavoritesOnly && (
+                 <span className="px-3 py-1 bg-red-600 shadow-md rounded-full text-[10px] font-bold text-white border border-red-500 flex items-center gap-1">
+                   <Heart size={10} className="fill-white"/> Preferiti
+                 </span>
+               )}
                {selectedType !== 'All' && (
                  <span className="px-3 py-1 bg-orange-600 shadow-md rounded-full text-[10px] font-bold text-white border border-orange-500 flex items-center gap-1">
                    <Tent size={10}/> {selectedType}
@@ -479,17 +631,21 @@ export default function App() {
           )}
         </header>
 
-        <div className="w-full h-full relative">
-          {viewMode === 'list' ? (
-            // CHANGED: z-index increased to [10], overflow-y-auto, overscroll-contain, bg-zinc-950 added
-            <div className="absolute inset-0 z-[10] pt-32 px-6 pb-24 overflow-y-auto touch-scroll overscroll-contain pointer-events-auto bg-zinc-950">
+        {viewMode === 'list' ? (
+          <div className="h-full w-full bg-zinc-950 overflow-y-auto touch-scroll">
+            <div className="pt-32 px-6 pb-40 min-h-full">
               {filteredPois.length > 0 ? (
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
                   {filteredPois.map(p => (
-                    <div key={p.id} onClick={() => { setSelectedPoi(p); setIsDetailPanelOpen(true); }} className="bg-zinc-900 border border-zinc-800 rounded-2xl overflow-hidden hover:border-zinc-600 transition-all cursor-pointer group shadow-lg">
+                    <div key={p.id} onClick={() => { setSelectedPoi(p); setIsDetailPanelOpen(true); }} className="bg-zinc-900 border border-zinc-800 rounded-2xl overflow-hidden hover:border-zinc-600 transition-all cursor-pointer group shadow-lg relative">
                       <div className="h-40 w-full overflow-hidden relative">
                         <img src={p.imageUrl} className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500" loading="lazy"/>
-                        <div className="absolute top-2 right-2 bg-black/60 backdrop-blur px-2 py-1 rounded text-[10px] font-bold border border-white/10">{p.type}</div>
+                        <div className="absolute top-2 right-2 flex gap-2">
+                           <button onClick={(e) => toggleFavorite(e, p)} className={`w-7 h-7 flex items-center justify-center rounded-full backdrop-blur border transition-all ${favorites.has(p.id) ? 'bg-red-500/90 text-white border-red-400' : 'bg-black/40 text-white border-white/20 hover:bg-black/60'}`}>
+                              <Heart size={14} className={favorites.has(p.id) ? "fill-white" : ""}/>
+                           </button>
+                           <div className="bg-black/60 backdrop-blur px-2 py-1 rounded text-[10px] font-bold border border-white/10 text-white">{p.type}</div>
+                        </div>
                       </div>
                       <div className="p-4">
                         <div className="flex justify-between items-start">
@@ -502,15 +658,19 @@ export default function App() {
                   ))}
                 </div>
               ) : (
-                <div className="flex flex-col items-center justify-center h-full text-zinc-500 mt-20">
-                  <Tent size={48} className="mb-4 text-zinc-700"/>
-                  <p className="text-sm font-medium">Nessun punto di interesse trovato con questi filtri.</p>
-                  <p className="text-xs mt-2">Prova a cambiare tipologia o zoomare sulla mappa per cercare.</p>
+                <div className="flex flex-col items-center justify-center py-20 text-zinc-500">
+                  {showFavoritesOnly ? <Heart size={48} className="mb-4 text-zinc-700"/> : <Tent size={48} className="mb-4 text-zinc-700"/>}
+                  <p className="text-sm font-medium">Nessun punto di interesse trovato.</p>
+                  <p className="text-xs mt-2">{showFavoritesOnly ? "Non hai ancora aggiunto preferiti." : "Prova a cambiare filtri o zoomare sulla mappa."}</p>
                 </div>
               )}
             </div>
-          ) : <div ref={mapContainerRef} className="w-full h-full"/>}
-        </div>
+          </div>
+        ) : (
+          <div className="h-full w-full relative">
+             <div ref={mapContainerRef} className="w-full h-full"/>
+          </div>
+        )}
 
         {/* STATUS BAR */}
         <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[4000] flex flex-col items-center gap-2 pointer-events-none">
@@ -554,7 +714,16 @@ export default function App() {
                   </div>
                   <div className="h-px bg-zinc-800 my-2" />
                   <button disabled={isOffline || isDownloading} onClick={downloadMapArea} className="w-full py-3 bg-zinc-800 hover:bg-zinc-700 disabled:opacity-50 disabled:cursor-not-allowed rounded-xl text-xs font-bold flex items-center justify-center gap-2 text-zinc-200 transition-all border border-zinc-700">
-                    {isDownloading ? <><Loader2 size={14} className="animate-spin text-orange-500"/> <span className="text-orange-500">{downloadProgress}%</span></> : <><Download size={14}/> Scarica Area Offline</>}
+                    {isDownloading ? 
+                      (
+                        downloadProgress === 'fetching' ? 
+                          <><Loader2 size={14} className="animate-spin text-orange-500"/> Scarico dati...</> :
+                        downloadProgress === 'saving' ?
+                          <><Database size={14} className="animate-pulse text-emerald-500"/> Salvo {downloadCount} Punti...</> :
+                          <><CheckCircle2 size={14} className="text-emerald-500"/> Completato!</>
+                      )
+                      : <><Download size={14}/> Scarica Area Offline</>
+                    }
                   </button>
                 </div>
               )}
@@ -574,7 +743,12 @@ export default function App() {
       <div ref={detailPanelRef} className={`fixed inset-y-0 right-0 z-[6000] w-full md:w-[450px] bg-zinc-900 border-l border-zinc-800 shadow-2xl transition-transform duration-300 ${isDetailPanelOpen && selectedPoi ? 'translate-x-0' : 'translate-x-full'}`}>
           {selectedPoi && (
             <div className="h-full flex flex-col relative">
-             <button onClick={() => setIsDetailPanelOpen(false)} className="absolute top-4 right-4 z-10 w-8 h-8 flex items-center justify-center bg-black/40 hover:bg-black/60 rounded-full text-white transition-colors backdrop-blur"><X size={18}/></button>
+             <div className="absolute top-4 right-4 z-10 flex gap-2">
+                 <button onClick={(e) => toggleFavorite(e, selectedPoi)} className={`w-8 h-8 flex items-center justify-center rounded-full backdrop-blur border transition-all ${favorites.has(selectedPoi.id) ? 'bg-red-500/90 text-white border-red-400' : 'bg-black/40 text-white border-white/20 hover:bg-black/60'}`}>
+                    <Heart size={16} className={favorites.has(selectedPoi.id) ? "fill-white" : ""}/>
+                 </button>
+                 <button onClick={() => setIsDetailPanelOpen(false)} className="w-8 h-8 flex items-center justify-center bg-black/40 hover:bg-black/60 rounded-full text-white transition-colors backdrop-blur border border-white/10"><X size={18}/></button>
+             </div>
              
              {/* Header Image */}
              <div className="h-64 relative shrink-0">
@@ -678,8 +852,11 @@ export default function App() {
 
              </div>
 
-             <div className="p-4 border-t border-zinc-800 bg-zinc-900 pb-8">
-               <button className="w-full py-3.5 bg-white text-black font-bold rounded-xl flex items-center justify-center gap-2 hover:bg-zinc-200 transition-colors">
+             <div className="p-4 border-t border-zinc-800 bg-zinc-900 pb-8 space-y-3">
+               <button onClick={handleShowOnMap} className="w-full py-3 bg-zinc-800 text-zinc-300 font-bold rounded-xl flex items-center justify-center gap-2 hover:bg-zinc-700 transition-colors border border-zinc-700">
+                  <MapIcon size={18}/> Vedi in Mappa
+               </button>
+               <button onClick={() => window.open(`https://www.google.com/maps/dir/?api=1&destination=${selectedPoi.coordinates.lat},${selectedPoi.coordinates.lng}`)} className="w-full py-3.5 bg-orange-600 text-white font-bold rounded-xl flex items-center justify-center gap-2 hover:bg-orange-700 transition-colors shadow-lg shadow-orange-900/20">
                   <Navigation size={18}/> Naviga verso {selectedPoi.name}
                </button>
              </div>
