@@ -18,26 +18,28 @@
         /* Remove default Leaflet controls as we use custom ones */
         .leaflet-control-zoom { display: none !important; }
 
-        /* Modern Scale Control */
+        /* Modern Dark Scale Control - Lower position */
         .leaflet-control-scale-line {
-            background: rgba(9, 9, 11, 0.75) !important;
-            border: 1px solid rgba(82, 82, 91, 0.4) !important;
+            background: rgba(24, 24, 27, 0.9) !important; /* Zinc-900 with opacity */
+            border: 1px solid rgba(63, 63, 70, 0.5) !important; /* Zinc-700 */
             border-top: none !important;
-            color: #e4e4e7 !important;
-            border-radius: 0 0 6px 6px;
-            padding: 4px 8px;
+            color: #d4d4d8 !important; /* Zinc-300 */
+            border-radius: 4px;
+            padding: 2px 8px;
             font-family: 'Inter', sans-serif;
             font-size: 11px;
-            font-weight: 600;
+            font-weight: 500;
             text-shadow: none !important;
-            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.2);
-            backdrop-filter: blur(4px);
-            margin-bottom: 10px !important;
-            margin-left: 10px !important;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.3);
+            margin-bottom: 8px !important; 
+            margin-left: 16px !important;
         }
 
-        /* Dark Mode Tile Filters */
-        .dark-tiles { filter: invert(100%) hue-rotate(180deg) brightness(95%) contrast(90%); }
+        /* Dark Mode Tile Filters - Balanced for Visibility */
+        .dark-tiles { 
+            /* Invert colors, rotate hue to fix colors, but keep brightness high enough to see paths */
+            filter: invert(100%) hue-rotate(180deg) brightness(90%) contrast(90%) grayscale(10%); 
+        }
 
         /* Status Animations */
         @keyframes status-pulse {
@@ -49,10 +51,52 @@
             animation: status-pulse 2s infinite ease-in-out;
         }
 
-        /* Range Slider and Popup Overrides */
-        .range-slider-container input[type=range] { pointer-events: none; -webkit-appearance: none; z-index: 20; height: 100%; width: 100%; position: absolute; left: 0; top: 0; background: transparent; }
-        .range-slider-container input[type=range]::-webkit-slider-thumb { pointer-events: all; width: 16px; height: 16px; -webkit-appearance: none; background-color: #ea580c; border-radius: 50%; box-shadow: 0 0 0 2px #18181b; }
-        .leaflet-popup-content-wrapper, .leaflet-popup-tip { background-color: #18181b !important; color: #e4e4e7 !important; border: 1px solid #3f3f46; box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.5); }
+        /* Custom Range Slider Styling */
+        input[type=range] {
+            -webkit-appearance: none; 
+            width: 100%; 
+            background: transparent; 
+        }
+        input[type=range]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            height: 16px;
+            width: 16px;
+            border-radius: 50%;
+            background: #ea580c;
+            cursor: pointer;
+            margin-top: -6px; 
+            box-shadow: 0 0 0 2px #18181b;
+        }
+        input[type=range]::-webkit-slider-runnable-track {
+            width: 100%;
+            height: 4px;
+            cursor: pointer;
+            background: #3f3f46;
+            border-radius: 2px;
+        }
+
+        /* Leaflet Popup Dark Mode Overrides */
+        .leaflet-popup-content-wrapper {
+            background-color: #18181b !important; /* Zinc-900 */
+            color: #e4e4e7 !important; /* Zinc-200 */
+            border: 1px solid #3f3f46; /* Zinc-700 */
+            border-radius: 12px !important;
+            padding: 0 !important; /* Remove padding to handle it in inner HTML */
+            overflow: hidden;
+        }
+        .leaflet-popup-tip {
+            background-color: #18181b !important;
+            border: 1px solid #3f3f46;
+            border-top: none;
+            border-left: none;
+        }
+        .leaflet-popup-content {
+            margin: 0 !important;
+            line-height: 1.4;
+        }
+        .leaflet-popup-close-button {
+            display: none; /* We use custom close or click-away */
+        }
     </style>
 <script type="importmap">
 {
